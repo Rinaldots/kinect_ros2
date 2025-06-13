@@ -34,9 +34,6 @@ private:
   static void rgb_cb(freenect_device * dev, void * rgb_ptr, uint32_t timestamp);
 
   void timer_callback();
-
-  // processamento contínuo de eventos do Kinect
-  std::thread processing_thread_;
 };
 
 }
