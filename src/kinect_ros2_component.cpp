@@ -1,7 +1,5 @@
 #include "kinect_ros2/kinect_ros2_component.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include <rmw/qos_profiles.h>
-#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -19,9 +17,8 @@ static bool _rgb_flag;
 KinectRosComponent::KinectRosComponent(const rclcpp::NodeOptions & options)
 : Node("kinect_ros2", options)
 {
+  timer_ = create_wall_timer(33ms, std::bind(&KinectRosComponent::timer_callback, this));
   
-  timer_ = create_wall_timer(1ms, std::bind(&KinectRosComponent::timer_callback, this));
-
   std::string pkg_share = ament_index_cpp::get_package_share_directory("kinect_ros2");
 
   //todo: use parameters
@@ -38,11 +35,8 @@ KinectRosComponent::KinectRosComponent(const rclcpp::NodeOptions & options)
   depth_info_ = depth_info_manager_->getCameraInfo();
   depth_info_.header.frame_id = "kinect_depth";
 
-  // uso de QoS sensor_data (best effort)
-  depth_pub_ = image_transport::create_camera_publisher(
-    this, "depth/image_raw", rmw_qos_profile_sensor_data);
-  rgb_pub_ = image_transport::create_camera_publisher(
-    this, "image_raw", rmw_qos_profile_sensor_data);
+  depth_pub_ = image_transport::create_camera_publisher(this, "depth/image_raw");
+  rgb_pub_ = image_transport::create_camera_publisher(this, "image_raw");
 
   int ret = freenect_init(&fn_ctx_, NULL);
   if (ret < 0) {
@@ -96,23 +90,10 @@ KinectRosComponent::KinectRosComponent(const rclcpp::NodeOptions & options)
     RCLCPP_ERROR(get_logger(), "FREENECT - ERROR START RGB");
     rclcpp::shutdown();
   }
-
-  // thread não bloqueante para processar eventos
-  processing_thread_ = std::thread([this]() {
-    struct timeval tv{0, 10000};  // timeout de 10μs
-    while (rclcpp::ok()) {
-      freenect_process_events_timeout(fn_ctx_, &tv);
-    }
-  });
 }
 
 KinectRosComponent::~KinectRosComponent()
 {
-  // garante que a thread seja finalizada
-  if (processing_thread_.joinable()) {
-    processing_thread_.join();
-  }
-
   RCLCPP_INFO(get_logger(), "stoping kinnect");
   freenect_stop_depth(fn_dev_);
   freenect_stop_video(fn_dev_);
@@ -127,8 +108,6 @@ to a new cv::Mat. This way, the callback only used to set a flag that indicates 
 has arrived. The flag is unset when a msg is published */
 void KinectRosComponent::depth_cb(freenect_device * dev, void * depth_ptr, uint32_t timestamp)
 {
-  (void)dev;
-  (void)timestamp;
   if (_depth_flag) {
     return;
   }
@@ -143,8 +122,6 @@ void KinectRosComponent::depth_cb(freenect_device * dev, void * depth_ptr, uint3
 
 void KinectRosComponent::rgb_cb(freenect_device * dev, void * rgb_ptr, uint32_t timestamp)
 {
-  (void)dev;
-  (void)timestamp;
   if (_rgb_flag) {
     return;
   }
@@ -159,26 +136,37 @@ void KinectRosComponent::rgb_cb(freenect_device * dev, void * rgb_ptr, uint32_t 
 
 void KinectRosComponent::timer_callback()
 {
-  // somente publica se novos frames chegaram
-  if (!_depth_flag && !_rgb_flag) {
-    return;
-  }
+  freenect_process_events(fn_ctx_);
 
+  
   auto stamp = now();
   std_msgs::msg::Header rgb_header, depth_header;
   rgb_header.frame_id = "kinect_rgb"; rgb_header.stamp = stamp;
   depth_header.frame_id = "kinect_depth"; depth_header.stamp = stamp;
   rgb_info_.header = rgb_header;
   depth_info_.header = depth_header;
-
+  
   if (_depth_flag) {
+    //convert 16bit to 8bit mono
+    // cv::Mat depth_8UC1(_depth_image, CV_16UC1);
+    // depth_8UC1.convertTo(depth_8UC1, CV_8UC1);
     auto msg = cv_bridge::CvImage(depth_header, "16UC1", _depth_image).toImageMsg();
+
     depth_pub_.publish(*msg, depth_info_);
+
+    // cv::imshow("Depth", _depth_image);
+    // cv::waitKey(1);
     _depth_flag = false;
   }
+
   if (_rgb_flag) {
+
+    
     auto msg = cv_bridge::CvImage(rgb_header, "rgb8", _rgb_image).toImageMsg();
     rgb_pub_.publish(*msg, rgb_info_);
+    
+    // cv::imshow("RGB", _rgb_image);
+    // cv::waitKey(1);
     _rgb_flag = false;
   }
 }
@@ -186,5 +174,3 @@ void KinectRosComponent::timer_callback()
 
 #include "rclcpp_components/register_node_macro.hpp"
 RCLCPP_COMPONENTS_REGISTER_NODE(kinect_ros2::KinectRosComponent)
-
-
